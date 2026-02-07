@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EYECONTROL | THE AWAKENING</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/ScrollTrigger.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@800&family=JetBrains+Mono:wght@300;500&display=swap" rel="stylesheet">
+    <style>
+        body { margin: 0; background-color: #000; color: #fff; overflow-x: hidden; font-family: 'JetBrains Mono', monospace; }
+        #webgl-canvas { position: fixed; top: 0; left: 0; z-index: 1; outline: none; }
+        .ui-layer { position: relative; z-index: 10; pointer-events: none; }
+        .interactive { pointer-events: auto; }
+        h1 { font-family: 'Syne', sans-serif; line-height: 0.8; }
+        .feature-card { background: rgba(255, 0, 0, 0.05); backdrop-filter: blur(15px); border: 1px solid rgba(255, 0, 0, 0.2); padding: 2.5rem; opacity: 0; transform: translateY(30px); }
+        .download-btn { border: 1px solid #ff0000; color: #ff0000; padding: 1.2rem 3rem; font-weight: 800; background: rgba(255,0,0,0.1); transition: 0.4s cubic-bezier(0.19, 1, 0.22, 1); }
+        .download-btn:hover { background: #ff0000; color: #000; box-shadow: 0 0 50px rgba(255, 0, 0, 0.8); letter-spacing: 2px; }
+        .awakening-overlay { position: fixed; inset: 0; background: #ff0000; z-index: 100; opacity: 0; pointer-events: none; mix-blend-mode: overlay; }
+    </style>
+</head>
+<body>
+
+    <div class="awakening-overlay" id="flash"></div>
+    <canvas id="webgl-canvas"></canvas>
+
+    <main class="ui-layer">
+        <section class="h-screen flex flex-col items-center justify-center text-center px-6">
+            <div id="hero">
+                <p class="text-red-600 text-[10px] tracking-[0.8em] mb-4 opacity-50">STREAMS_OF_HATRED_DETECTED</p>
+                <h1 class="text-7xl md:text-[10rem] mb-10">EYE<br>CONTROL</h1>
+                <button class="download-btn interactive" onclick="awaken()">INITIALIZE AWAKENING</button>
+            </div>
+        </section>
+
+        <section class="h-[400vh] relative">
+            <div class="sticky top-0 h-screen flex flex-col justify-center px-10 md:px-32 max-w-2xl">
+                <div class="feature-card mb-10" id="f1">
+                    <span class="text-red-500 font-bold text-xs mb-2 block">POWER 01</span>
+                    <h2 class="text-4xl font-bold mb-4 font-[Syne]">OBSERVATION</h2>
+                    <p class="text-zinc-400 text-sm">Track DOM movements before they render. See the code beneath the skin of the web.</p>
+                </div>
+                <div class="feature-card mb-10" id="f2">
+                    <span class="text-red-500 font-bold text-xs mb-2 block">POWER 02</span>
+                    <h2 class="text-4xl font-bold mb-4 font-[Syne]">HYPNOSIS</h2>
+                    <p class="text-zinc-400 text-sm">Force-inject behaviors into third-party sites. Control the flow of information with a glance.</p>
+                </div>
+                <div class="feature-card" id="f3">
+                    <span class="text-red-500 font-bold text-xs mb-2 block">POWER 03</span>
+                    <h2 class="text-4xl font-bold mb-4 font-[Syne]">COPY_WHEEL</h2>
+                    <p class="text-zinc-400 text-sm">Instantly replicate complex site components and export them to your local environment.</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="h-screen flex items-center justify-center">
+            <button class="download-btn interactive text-2xl px-20">INSTALL_SHARINGAN</button>
+        </section>
+    </main>
+
+    <script id="eye-fs" type="x-shader/x-fragment">
+        uniform float uTime;
+        uniform float uAwaken;
+        uniform float uScroll;
+        varying vec2 vUv;
+
+        void main() {
+            vec2 uv = vUv - 0.5;
+            float dist = length(uv);
+            
+            // Iris Color Transition (Human to Red)
+            vec3 humanColor = vec3(0.1, 0.05, 0.02);
+            vec3 sharinganRed = vec3(0.9, 0.0, 0.0);
+            vec3 baseIris = mix(humanColor, sharinganRed, uAwaken);
+            
+            // Rotation speeds up as it awakens
+            float angle = atan(uv.y, uv.x) + (uTime * (0.2 + uAwaken * 2.0)) + (uScroll * 5.0);
+            
+            float pattern = 0.0;
+            float tomoeCount = 3.0;
+            
+            // Awakening Logic: Tomoe emerge from the pupil
+            for(float i=0.0; i<3.0; i++) {
+                float theta = angle + i * (6.2831 / tomoeCount);
+                float radius = 0.28 * uAwaken; // Tomoe move outward
+                vec2 p = vec2(cos(theta), sin(theta)) * radius;
+                
+                // The Tomoe "comma" shape
+                float d = length(uv - p);
+                float head = smoothstep(0.08 * uAwaken, 0.0, d);
+                
+                float tailTheta = theta + 0.4;
+                vec2 tailP = vec2(cos(tailTheta), sin(tailTheta)) * (radius + 0.05);
+                float tail = smoothstep(0.1 * uAwaken, 0.0, length(uv - tailP)) * 0.7;
+                
+                pattern += head + tail;
+            }
+
+            vec3 color = mix(baseIris, vec3(0.0), clamp(pattern, 0.0, 1.0) * uAwaken);
+            
+            // Black rings (Sharingan details)
+            float ring1 = smoothstep(0.24, 0.23, dist) * smoothstep(0.21, 0.22, dist) * uAwaken;
+            color = mix(color, vec3(0.0), ring1);
+
+            // Pupil remains black
+            float pupil = smoothstep(0.1 * (1.0 + uAwaken * 0.5), 0.08, dist);
+            color = mix(color, vec3(0.0), pupil);
+
+            gl_FragColor = vec4(color, smoothstep(0.5, 0.48, dist));
+        }
+    </script>
+
+    <script id="eye-vs" type="x-shader/x-vertex">
+        varying vec2 vUv;
+        void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+    </script>
+
+    <script>
+        gsap.registerPlugin(ScrollTrigger);
+
+        const canvas = document.querySelector('#webgl-canvas');
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.z = 8;
+
+        const eyeGroup = new THREE.Group();
+        
+        // Sclera: Turns grey/veiny during awakening
+        const sclera = new THREE.Mesh(
+            new THREE.SphereGeometry(2, 64, 64),
+            new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.1 })
+        );
+        eyeGroup.add(sclera);
+
+        const irisMat = new THREE.ShaderMaterial({
+            uniforms: { uTime: { value: 0 }, uAwaken: { value: 0 }, uScroll: { value: 0 } },
+            vertexShader: document.getElementById('eye-vs').textContent,
+            fragmentShader: document.getElementById('eye-fs').textContent,
+            transparent: true
+        });
+        const iris = new THREE.Mesh(new THREE.PlaneGeometry(1.9, 1.9), irisMat);
+        iris.position.z = 1.98;
+        eyeGroup.add(iris);
+
+        scene.add(eyeGroup);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+        const pLight = new THREE.PointLight(0xff0000, 0, 10);
+        pLight.position.set(2, 2, 5);
+        scene.add(pLight);
+
+        let mX = 0, mY = 0;
+        window.addEventListener('mousemove', e => {
+            mX = (e.clientX / window.innerWidth) - 0.5;
+            mY = (e.clientY / window.innerHeight) - 0.5;
+        });
+
+        function animate(time) {
+            irisMat.uniforms.uTime.value = time * 0.001;
+            irisMat.uniforms.uScroll.value = window.scrollY / 5000;
+            
+            eyeGroup.rotation.y = THREE.MathUtils.lerp(eyeGroup.rotation.y, mX * 0.8, 0.1);
+            eyeGroup.rotation.x = THREE.MathUtils.lerp(eyeGroup.rotation.x, mY * 0.8, 0.1);
+            
+            renderer.render(scene, camera);
+            requestAnimationFrame(animate);
+        }
+        animate();
+
+        function awaken() {
+            const tl = gsap.timeline();
+            
+            // The "Mind-Fuck" Awakening Sequence
+            tl.to("#flash", { opacity: 0.8, duration: 0.1 })
+              .to("#flash", { opacity: 0, duration: 0.4 })
+              .to(irisMat.uniforms.uAwaken, { value: 1, duration: 2, ease: "power4.inOut" }, 0)
+              .to(camera.position, { z: 4, duration: 2, ease: "expo.inOut" }, 0)
+              .to(sclera.material.color, { r: 0.8, g: 0.8, b: 0.8, duration: 2 }, 0)
+              .to(pLight, { intensity: 4, duration: 2 }, 0);
+              
+            gsap.to("#hero", { opacity: 0, y: -50, duration: 1 });
+        }
+
+        // Feature Reveals on Scroll
+        ['f1', 'f2', 'f3'].forEach((id) => {
+            gsap.to(`#${id}`, {
+                opacity: 1,
+                y: 0,
+                scrollTrigger: {
+                    trigger: `#${id}`,
+                    start: "top 80%",
+                    end: "top 40%",
+                    scrub: true
+                }
+            });
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
