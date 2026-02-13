@@ -19,6 +19,9 @@
         CALIBRATION_POINTS: 9,
         CLICKS_PER_POINT: 2,
 
+        // Cursor smoothing (0.1 = very smooth, 0.5 = responsive, 1.0 = instant)
+        CURSOR_SMOOTHING: 0.15,
+
         ZONES: ['SCROLL_UP', 'SCROLL_DOWN', 'MEDIA', 'ASK_AI', 'KILL_SWITCH'],
         STORAGE_KEY: 'sharingan_python_calibrated',
         PERPLEXITY_API_KEY: 'YOUR_API_KEY_HERE'
@@ -40,9 +43,17 @@
         isConnected: false,
         reconnectTimer: null,
 
-        // Gaze
+        // Gaze - target position (from server)
         gazeX: null,
         gazeY: null,
+
+        // Gaze - current animated position (what we display)
+        displayX: null,
+        displayY: null,
+
+        // Animation
+        animationFrameId: null,
+        lastAnimationTime: 0,
 
         // Calibration
         isCalibrated: false,
@@ -562,16 +573,29 @@
         dot.id = 'eye-gaze-target-dot';
         dot.style.cssText = `
             position: fixed;
-            width: 24px;
-            height: 24px;
-            background: radial-gradient(circle, rgba(254, 202, 87, 0.9) 0%, rgba(254, 202, 87, 0.4) 40%, transparent 70%);
+            width: 28px;
+            height: 28px;
+            background: radial-gradient(circle, rgba(254, 202, 87, 0.95) 0%, rgba(254, 202, 87, 0.5) 35%, transparent 65%);
             border-radius: 50%;
             pointer-events: none;
             z-index: 2147483646;
             transform: translate(-50%, -50%);
-            box-shadow: 0 0 20px rgba(254, 202, 87, 0.6), 0 0 40px rgba(255, 107, 107, 0.3);
-            opacity: 0.9;
+            box-shadow: 0 0 25px rgba(254, 202, 87, 0.7), 0 0 50px rgba(255, 107, 107, 0.4);
+            opacity: 0.95;
+            will-change: left, top;
+            animation: gazePulse 2s ease-in-out infinite;
         `;
+
+        // Add keyframes for pulse animation
+        const styleSheet = document.createElement('style');
+        styleSheet.textContent = `
+            @keyframes gazePulse {
+                0%, 100% { transform: translate(-50%, -50%) scale(1); }
+                50% { transform: translate(-50%, -50%) scale(1.1); }
+            }
+        `;
+        document.head.appendChild(styleSheet);
+
         document.body.appendChild(dot);
         return dot;
     }
@@ -587,13 +611,57 @@
         return x >= window.innerWidth - CONFIG.SIDEBAR_WIDTH;
     }
 
-    function updateGazePosition(x, y) {
-        const dot = document.getElementById('eye-gaze-target-dot');
-        if (dot) {
-            dot.style.left = `${x}px`;
-            dot.style.top = `${y}px`;
+    // ============== SMOOTH CURSOR ANIMATION ==============
+    function startCursorAnimation() {
+        if (state.animationFrameId) return; // Already running
+
+        function animate() {
+            if (state.gazeX === null || state.gazeY === null) {
+                state.animationFrameId = requestAnimationFrame(animate);
+                return;
+            }
+
+            // Initialize display position if not set
+            if (state.displayX === null) {
+                state.displayX = state.gazeX;
+                state.displayY = state.gazeY;
+            }
+
+            // Smooth interpolation towards target
+            const smoothing = CONFIG.CURSOR_SMOOTHING;
+            state.displayX += (state.gazeX - state.displayX) * smoothing;
+            state.displayY += (state.gazeY - state.displayY) * smoothing;
+
+            // Update the visual dot position
+            const dot = document.getElementById('eye-gaze-target-dot');
+            if (dot) {
+                dot.style.left = `${state.displayX}px`;
+                dot.style.top = `${state.displayY}px`;
+            }
+
+            // Update zone detection using the smoothed display position
+            updateZoneFromGaze(state.displayX, state.displayY);
+
+            state.animationFrameId = requestAnimationFrame(animate);
         }
 
+        state.animationFrameId = requestAnimationFrame(animate);
+    }
+
+    function stopCursorAnimation() {
+        if (state.animationFrameId) {
+            cancelAnimationFrame(state.animationFrameId);
+            state.animationFrameId = null;
+        }
+    }
+
+    function updateGazePosition(x, y) {
+        // Just update the target - animation loop handles the rest
+        state.gazeX = x;
+        state.gazeY = y;
+    }
+
+    function updateZoneFromGaze(x, y) {
         const host = document.getElementById('eye-sidebar-host');
         if (!host || !host.shadowRoot) return;
 
@@ -1035,6 +1103,9 @@
         createRecalibrationButton();
         createCameraPreview();  // Add camera preview
 
+        // Start smooth cursor animation loop
+        startCursorAnimation();
+
         // Connect to Python server
         setTimeout(() => {
             connectToServer();
@@ -1056,7 +1127,12 @@
         });
 
         document.addEventListener('visibilitychange', () => {
-            if (document.hidden) stopScrolling();
+            if (document.hidden) {
+                stopScrolling();
+                stopCursorAnimation();
+            } else {
+                startCursorAnimation();
+            }
         });
     }
 
