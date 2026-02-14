@@ -38,15 +38,15 @@ CONFIG = {
     "CALIBRATION_POINTS": 9,
     
     # Gaze sensitivity - higher = you can reach screen edges with smaller eye movement
-    "SENSITIVITY_X": 3.8,  # Boosted for better horizontal reach to side UI
-    "SENSITIVITY_Y": 3.0,  # Vertical was usually OK
+    "SENSITIVITY_X": 6.5,  # Significantly increased to reach right edge easily
+    "SENSITIVITY_Y": 5.5,  # Significantly increased to reach top edge (was 3.0, too low)
     
     # Mirror the camera (so it acts like looking in a mirror)
     "MIRROR_CAMERA": True,
     
-    # Head movement compensation - slightly reduced so it doesn't cancel eye movement
-    "HEAD_COMPENSATION_X": 0.08,
-    "HEAD_COMPENSATION_Y": 0.15,
+    # Head movement compensation - reduced to minimum so it doesn't cancel eye movement
+    "HEAD_COMPENSATION_X": 0.03,  # Much reduced - head movement shouldn't cancel eye tracking
+    "HEAD_COMPENSATION_Y": 0.05,  # Much reduced for vertical - was 0.15, too high
     
     # Outlier rejection threshold (ignore sudden jumps)
     "OUTLIER_THRESHOLD": 400,  # pixels - increased to allow larger movements (was 200, too restrictive)
@@ -77,7 +77,8 @@ class ImprovedGazeEstimator:
 
         # Stuck detection - reset baseline if cursor stuck
         self.last_gaze_positions = deque(maxlen=30)  # Track last 30 positions
-        self.stuck_threshold = 5  # If same position for 5 frames, consider stuck
+        self.last_raw_gaze = deque(maxlen=10)  # Track raw gaze to detect if user is trying to move
+        self.stuck_threshold = 10  # Increased threshold - only reset if stuck for 10 frames
 
         # Calibration - using homography for accurate mapping
         self.calibration_points_raw = []  # Raw iris positions during calibration
@@ -96,6 +97,68 @@ class ImprovedGazeEstimator:
 
         # For debug drawing
         self.last_landmarks = None
+        
+        # Blink detection
+        self.eye_closed_frames = 0  # Count consecutive frames with eyes closed
+        self.blink_threshold = 3  # Eyes must be closed for 3 frames to register blink
+        self.last_blink_time = 0  # Prevent multiple triggers
+        self.blink_cooldown = 0.5  # Minimum time between blinks (seconds)
+        
+        # Eye landmark indices for EAR calculation (MediaPipe Face Landmarker)
+        # Face Landmarker has 468 landmarks, using key points for eye aspect ratio
+        # Left eye key points: outer corner, inner corner, top center, bottom center
+        # Right eye key points: outer corner, inner corner, top center, bottom center
+        # Using simplified 4-point method for robustness
+        self.left_eye_indices = [33, 133, 159, 145]  # [outer corner, inner corner, top, bottom]
+        self.right_eye_indices = [362, 263, 386, 374]  # [outer corner, inner corner, top, bottom]
+
+    def calculate_eye_aspect_ratio(self, eye_landmarks):
+        """Calculate Eye Aspect Ratio (EAR) - lower value means eye is more closed"""
+        if len(eye_landmarks) < 4:
+            return 1.0  # Default to open if not enough points
+        
+        # Get the 4 key points: outer, inner, top, bottom
+        outer, inner, top, bottom = eye_landmarks[:4]
+        
+        # Calculate vertical distance (top to bottom)
+        vertical = np.sqrt((top.x - bottom.x)**2 + (top.y - bottom.y)**2)
+        
+        # Calculate horizontal distance (outer to inner corner)
+        horizontal = np.sqrt((outer.x - inner.x)**2 + (outer.y - inner.y)**2)
+        
+        if horizontal == 0:
+            return 1.0
+        
+        # EAR = vertical distance / horizontal distance
+        # When eye is open, vertical is larger relative to horizontal
+        # When eye is closed, vertical becomes very small
+        ear = vertical / horizontal
+        return ear
+    
+    def detect_blink(self, face_landmarks):
+        """Detect if user is blinking (both eyes closed)"""
+        if len(face_landmarks) < max(max(self.left_eye_indices), max(self.right_eye_indices)) + 1:
+            return False, 1.0
+        
+        # Get eye landmarks
+        left_eye_points = [face_landmarks[i] for i in self.left_eye_indices if i < len(face_landmarks)]
+        right_eye_points = [face_landmarks[i] for i in self.right_eye_indices if i < len(face_landmarks)]
+        
+        if len(left_eye_points) < 4 or len(right_eye_points) < 4:
+            return False, 1.0
+        
+        # Calculate EAR for both eyes
+        left_ear = self.calculate_eye_aspect_ratio(left_eye_points)
+        right_ear = self.calculate_eye_aspect_ratio(right_eye_points)
+        
+        # Average EAR
+        avg_ear = (left_ear + right_ear) / 2.0
+        
+        # Eye is closed if EAR < 0.15 (threshold tuned for MediaPipe Face Landmarker)
+        # Lower threshold because our simplified EAR calculation gives different values
+        eyes_closed = avg_ear < 0.15
+        
+        return eyes_closed, avg_ear
 
     def estimate_gaze(self, frame):
         """Estimate gaze position using MediaPipe Face Landmarker with iris landmarks"""
@@ -115,6 +178,25 @@ class ImprovedGazeEstimator:
         # Use first detected face (list of NormalizedLandmark)
         face_landmarks = results.face_landmarks[0]
         self.last_landmarks = face_landmarks
+        
+        # Detect blink
+        eyes_closed, ear_value = self.detect_blink(face_landmarks)
+        
+        # Track blink state
+        if eyes_closed:
+            self.eye_closed_frames += 1
+        else:
+            self.eye_closed_frames = 0
+        
+        # Check if blink is detected (eyes closed for threshold frames)
+        blink_detected = False
+        current_time = time.time()
+        if self.eye_closed_frames >= self.blink_threshold:
+            # Check cooldown to prevent multiple triggers
+            if current_time - self.last_blink_time > self.blink_cooldown:
+                blink_detected = True
+                self.last_blink_time = current_time
+                self.eye_closed_frames = 0  # Reset counter
 
         # Convert landmarks to numpy for convenience
         xs = np.array([lm.x for lm in face_landmarks])
@@ -169,16 +251,47 @@ class ImprovedGazeEstimator:
         screen_cx = CONFIG["SCREEN_WIDTH"] / 2
         screen_cy = CONFIG["SCREEN_HEIGHT"] / 2
 
-        # Map iris movement to screen coordinates
-        raw_x = screen_cx + (iris_delta_x * CONFIG["SENSITIVITY_X"] * CONFIG["SCREEN_WIDTH"] / 4)
-        raw_y = screen_cy + (iris_delta_y * CONFIG["SENSITIVITY_Y"] * CONFIG["SCREEN_HEIGHT"] / 4)
+        # Map iris movement to screen coordinates with non-linear amplification near edges
+        # Use larger multiplier and add edge amplification
+        base_sensitivity_x = CONFIG["SENSITIVITY_X"] * CONFIG["SCREEN_WIDTH"] / 3  # Changed from /4 to /3 for more range
+        base_sensitivity_y = CONFIG["SENSITIVITY_Y"] * CONFIG["SCREEN_HEIGHT"] / 3  # Changed from /4 to /3 for more vertical range
+        
+        # Non-linear amplification: if looking right (positive delta), amplify more
+        if iris_delta_x > 0:
+            # Amplify rightward movement more to reach right edge
+            sensitivity_multiplier_x = 1.0 + (iris_delta_x * 0.5)  # Up to 1.5x amplification
+        else:
+            sensitivity_multiplier_x = 1.0
+        
+        # Non-linear amplification: if looking up (negative delta_y in normalized coords = looking up), amplify more
+        if iris_delta_y < 0:  # Negative delta means looking up
+            # Amplify upward movement more to reach top edge
+            sensitivity_multiplier_y = 1.0 + (abs(iris_delta_y) * 0.6)  # Up to 1.6x amplification for upward
+        else:
+            sensitivity_multiplier_y = 1.0
+        
+        raw_x = screen_cx + (iris_delta_x * base_sensitivity_x * sensitivity_multiplier_x)
+        raw_y = screen_cy + (iris_delta_y * base_sensitivity_y * sensitivity_multiplier_y)
 
-        # Add head compensation
-        raw_x -= head_delta_x * CONFIG["HEAD_COMPENSATION_X"] * CONFIG["SCREEN_WIDTH"]
-        raw_y += head_delta_y * CONFIG["HEAD_COMPENSATION_Y"] * CONFIG["SCREEN_HEIGHT"]
+        # Add head compensation (minimal to avoid canceling eye movement)
+        # Only apply if head movement is significant, and reduce it
+        head_comp_x = head_delta_x * CONFIG["HEAD_COMPENSATION_X"] * CONFIG["SCREEN_WIDTH"]
+        head_comp_y = head_delta_y * CONFIG["HEAD_COMPENSATION_Y"] * CONFIG["SCREEN_HEIGHT"]
+        
+        # Reduce head compensation when looking at edges (where we need full eye movement)
+        edge_factor_x = 1.0
+        edge_factor_y = 1.0
+        if abs(iris_delta_x) > 0.1:  # If looking significantly left/right
+            edge_factor_x = 0.5  # Reduce horizontal head compensation by half
+        if abs(iris_delta_y) > 0.1:  # If looking significantly up/down
+            edge_factor_y = 0.3  # Reduce vertical head compensation even more (to 30%)
+        
+        raw_x -= head_comp_x * edge_factor_x
+        raw_y += head_comp_y * edge_factor_y
 
         # Store raw gaze for calibration
         self.current_raw_gaze = (raw_x, raw_y)
+        self.last_raw_gaze.append((raw_x, raw_y))  # Track raw gaze for stuck detection
 
         # Apply calibration if available
         if self.is_calibrated and self.homography_matrix is not None:
@@ -200,40 +313,51 @@ class ImprovedGazeEstimator:
         # Apply smoothing with outlier rejection
         smoothed_x, smoothed_y = self.smooth_gaze(calibrated_x, calibrated_y)
 
-        # Detect if cursor is stuck (same position for multiple frames)
+        # Detect if cursor is stuck (smarter detection - only if user is trying to move but cursor isn't)
         self.last_gaze_positions.append((smoothed_x, smoothed_y))
-        if len(self.last_gaze_positions) >= self.stuck_threshold:
-            # Check if last N positions are all very similar (within 10 pixels)
+        if len(self.last_gaze_positions) >= self.stuck_threshold and len(self.last_raw_gaze) >= 5:
+            # Check if smoothed cursor position is stuck (within 15 pixels for many frames)
             recent_positions = list(self.last_gaze_positions)[-self.stuck_threshold:]
-            if len(recent_positions) >= self.stuck_threshold:
-                first_pos = recent_positions[0]
-                all_similar = all(
-                    abs(p[0] - first_pos[0]) < 10 and abs(p[1] - first_pos[1]) < 10
-                    for p in recent_positions
+            first_pos = recent_positions[0]
+            all_similar = all(
+                abs(p[0] - first_pos[0]) < 15 and abs(p[1] - first_pos[1]) < 15
+                for p in recent_positions
+            )
+            
+            # Check if raw gaze is changing (user is trying to move)
+            recent_raw = list(self.last_raw_gaze)[-5:]
+            raw_is_changing = False
+            if len(recent_raw) >= 5:
+                raw_range_x = max(p[0] for p in recent_raw) - min(p[0] for p in recent_raw)
+                raw_range_y = max(p[1] for p in recent_raw) - min(p[1] for p in recent_raw)
+                # If raw gaze is moving significantly but cursor isn't, we're stuck
+                raw_is_changing = raw_range_x > 50 or raw_range_y > 50
+            
+            # Only reset if: cursor is stuck AND user is trying to move (raw gaze changing)
+            # Don't reset if user is intentionally holding still
+            if all_similar and raw_is_changing:
+                # Gently nudge baseline instead of full reset to avoid disrupting tracking
+                print(f"⚠️ Cursor stuck at ({smoothed_x:.0f}, {smoothed_y:.0f}), adjusting baseline...")
+                # Move baseline slightly toward current iris position (partial reset)
+                self.baseline_iris = (
+                    self.baseline_iris[0] * 0.7 + iris_x * 0.3,
+                    self.baseline_iris[1] * 0.7 + iris_y * 0.3
                 )
-                
-                # Check if stuck at screen edge
-                is_at_edge = (
-                    smoothed_x <= 10 or smoothed_x >= CONFIG["SCREEN_WIDTH"] - 10 or
-                    smoothed_y <= 10 or smoothed_y >= CONFIG["SCREEN_HEIGHT"] - 10
+                self.baseline_head = (
+                    self.baseline_head[0] * 0.7 + head_x * 0.3,
+                    self.baseline_head[1] * 0.7 + head_y * 0.3
                 )
-                
-                if all_similar and is_at_edge:
-                    # Reset baseline to current position to allow movement again
-                    print(f"⚠️ Cursor stuck at ({smoothed_x:.0f}, {smoothed_y:.0f}), resetting baseline...")
-                    self.baseline_iris = (iris_x, iris_y)
-                    self.baseline_head = (head_x, head_y)
-                    # Clear smoothing history to allow fresh start
-                    self.gaze_history_x.clear()
-                    self.gaze_history_y.clear()
-                    self.ema_x = None
-                    self.ema_y = None
-                    self.last_gaze_positions.clear()
+                # Clear some smoothing history but not all
+                if len(self.gaze_history_x) > 3:
+                    self.gaze_history_x = deque(list(self.gaze_history_x)[-2:], maxlen=CONFIG["SMOOTHING_BUFFER_SIZE"])
+                    self.gaze_history_y = deque(list(self.gaze_history_y)[-2:], maxlen=CONFIG["SMOOTHING_BUFFER_SIZE"])
+                self.last_gaze_positions.clear()
+                self.last_raw_gaze.clear()
 
         # Confidence: full face + iris landmarks -> high confidence
         confidence = 0.9
 
-        return smoothed_x, smoothed_y, confidence
+        return smoothed_x, smoothed_y, confidence, blink_detected
 
     def smooth_gaze(self, x, y):
         """Smooth gaze with weighted average + EMA + outlier rejection"""
@@ -496,9 +620,12 @@ class GazeServer:
                     pass  # Ignore drawing errors
                 
                 if result:
-                    gaze_x, gaze_y, confidence = result
+                    gaze_x, gaze_y, confidence, blink_detected = result
                     
                     status = f"Gaze: ({gaze_x:.0f}, {gaze_y:.0f})"
+                    if blink_detected:
+                        status += " [BLINK]"
+                        cv2.putText(display_frame, "BLINK DETECTED!", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     
                     if frame_count % 30 == 0:
@@ -512,6 +639,16 @@ class GazeServer:
                             "confidence": round(confidence, 2),
                             "timestamp": time.time() * 1000
                         }))
+                        
+                        # Send blink event if detected
+                        if blink_detected:
+                            print(f"👁️ Blink detected! Triggering double-click at ({gaze_x:.0f}, {gaze_y:.0f})")
+                            await websocket.send(json.dumps({
+                                "type": "blink",
+                                "x": round(gaze_x, 1),
+                                "y": round(gaze_y, 1),
+                                "timestamp": time.time() * 1000
+                            }))
                     except websockets.exceptions.ConnectionClosed:
                         break
                     except Exception as e:
